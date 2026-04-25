@@ -1,0 +1,727 @@
+{
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 9 * * 2,3,4"
+            },
+            {
+              "field": "cronExpression",
+              "expression": "0 13 * * 2,3,4"
+            },
+            {
+              "field": "cronExpression",
+              "expression": "0 18 * * 2,3,4"
+            },
+            {
+              "field": "cronExpression",
+              "expression": "0 9 * * 1,5"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -9872,
+        3792
+      ],
+      "id": "b4e7988f-52b7-4bd7-adac-00c1f665a74e",
+      "name": "Cron Trigger"
+    },
+    {
+      "parameters": {
+        "language": "pythonNative",
+        "pythonCode": "import json\nimport random\nimport time\nfrom datetime import datetime\nfrom pathlib import Path\n\nts = int(datetime.utcnow().timestamp())\nrand = random.randint(1000, 9999)\nsession_id = f'sess_{ts}_{rand}'\n\nfreeze_file = Path('/data/linkedin_intel/state/freeze.json')\nfrozen = False\nfreeze_reason = ''\n\nif freeze_file.exists():\n    try:\n        state = json.loads(freeze_file.read_text())\n        if state.get('frozen', False):\n            resume_str = state.get('resumeAfter', '')\n            if resume_str:\n                resume_dt = datetime.fromisoformat(resume_str)\n                now_dt = datetime.utcnow()\n                if now_dt < resume_dt:\n                    frozen = True\n                    freeze_reason = state.get('reason', 'UNKNOWN')\n                else:\n                    freeze_file.write_text(\n                        json.dumps({\n                            'frozen': False,\n                            'unfrozenAt': now_dt.isoformat()\n                        })\n                    )\n    except Exception as ex:\n        freeze_reason = f'FREEZE_READ_ERROR: {str(ex)}'\n\nday_of_year = datetime.utcnow().timetuple().tm_yday\nis_blackout = (day_of_year % 14 == 0)\n\njitter_seconds = random.randint(0, 480)\ntime.sleep(jitter_seconds)\n\nreturn [\n    {\n        'json': {\n            'sessionId': session_id,\n            'frozen': frozen,\n            'freezeReason': freeze_reason,\n            'isBlackout': is_blackout,\n            'startedAt': datetime.utcnow().isoformat(),\n            'jitterSeconds': jitter_seconds\n        }\n    }\n]"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -9648,
+        3792
+      ],
+      "id": "d9eba49a-66d7-44fb-9bc5-7af7a3ceab4e",
+      "name": "Build Session + Freeze Check"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "aa111111-1111-1111-1111-111111111111",
+              "leftValue": "={{ $json.frozen }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "aa222222-2222-2222-2222-222222222222",
+              "leftValue": "={{ $json.isBlackout }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -9440,
+        3792
+      ],
+      "id": "b7679d6c-aa93-4350-8109-6bc166518639",
+      "name": "Frozen OR Blackout?"
+    },
+    {
+      "parameters": {
+        "language": "pythonNative",
+        "pythonCode": "import json\nfrom datetime import datetime\nfrom pathlib import Path\n\nsession_id = _items[0]['json']['sessionId']\nreason = _items[0]['json'].get('freezeReason', '')\nis_blackout = _items[0]['json'].get('isBlackout', False)\n\nlog_reason = 'BLACKOUT_DAY' if is_blackout else f'FROZEN: {reason}'\n\nlog_file = Path('/data/linkedin_intel/logs/sessions.log')\nlog_file.parent.mkdir(parents=True, exist_ok=True)\n\nwith open(log_file, 'a') as f:\n    f.write(json.dumps({\n        'event': 'SESSION_SKIPPED',\n        'sessionId': session_id,\n        'reason': log_reason,\n        'timestamp': datetime.utcnow().isoformat()\n    }) + '\\n')\n\nreturn [\n    {\n        'json': {\n            'skipped': True,\n            'reason': log_reason,\n            'sessionId': session_id\n        }\n    }\n]"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -9216,
+        3648
+      ],
+      "id": "c15c6c53-f791-4107-bf12-2450e3379bbe",
+      "name": "Log Skip Reason"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        -8992,
+        3648
+      ],
+      "id": "fc57734b-42e3-4cfa-bec8-c85a2e5bd711",
+      "name": "No Operation, do nothing1"
+    },
+    {
+      "parameters": {
+        "language": "pythonNative",
+        "pythonCode": "import json\nimport sqlite3\nfrom datetime import datetime\nfrom pathlib import Path\n\nsession_id = _items[0]['json']['sessionId']\n\ndb_path = '/data/linkedin_intel/leads.db'\nPath(db_path).parent.mkdir(parents=True, exist_ok=True)\n\nconn = sqlite3.connect(db_path)\nconn.execute('PRAGMA journal_mode=WAL')\n\nconn.executescript(\"\"\"\n    CREATE TABLE IF NOT EXISTS leads (\n        id TEXT PRIMARY KEY,\n        author_name TEXT DEFAULT '',\n        author_url TEXT DEFAULT '',\n        post_text TEXT DEFAULT '',\n        emails TEXT DEFAULT '[]',\n        hashtags TEXT DEFAULT '[]',\n        tech_stack TEXT DEFAULT '[]',\n        role_title TEXT DEFAULT '',\n        experience_level TEXT DEFAULT '',\n        remote_signal TEXT DEFAULT '',\n        location TEXT DEFAULT '',\n        salary TEXT DEFAULT '',\n        relevance_score INTEGER DEFAULT 0,\n        bait_score INTEGER DEFAULT 0,\n        status TEXT DEFAULT 'NEW',\n        session_id TEXT DEFAULT '',\n        created_at TEXT DEFAULT '',\n        notes TEXT DEFAULT ''\n    );\n    CREATE TABLE IF NOT EXISTS sessions (\n        session_id TEXT PRIMARY KEY,\n        started_at TEXT,\n        ended_at TEXT DEFAULT '',\n        posts_scanned INTEGER DEFAULT 0,\n        leads_stored INTEGER DEFAULT 0,\n        detection_event TEXT DEFAULT '',\n        status TEXT DEFAULT 'RUNNING'\n    );\n    CREATE TABLE IF NOT EXISTS email_seen (\n        email_hash TEXT PRIMARY KEY,\n        email TEXT,\n        first_seen TEXT\n    );\n    CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status);\n    CREATE INDEX IF NOT EXISTS idx_leads_score ON leads(relevance_score DESC);\n    CREATE INDEX IF NOT EXISTS idx_leads_created ON leads(created_at DESC);\n\"\"\")\n\ntoday = datetime.utcnow().date().isoformat()\nrow = conn.execute(\n    \"SELECT COUNT(*) FROM sessions WHERE started_at LIKE ? AND status != 'RUNNING'\",\n    (f'{today}%',)\n).fetchone()\ntoday_count = row[0]\n\nconn.execute(\n    'INSERT OR IGNORE INTO sessions (session_id, started_at, status) VALUES (?, ?, ?)',\n    (session_id, datetime.utcnow().isoformat(), 'RUNNING')\n)\nconn.commit()\nconn.close()\n\nmax_sessions = 3\ncan_proceed = today_count < max_sessions\n\nreturn [\n    {\n        'json': {\n            'sessionId': session_id,\n            'frozen': _items[0]['json'].get('frozen', False),\n            'isBlackout': _items[0]['json'].get('isBlackout', False),\n            'startedAt': _items[0]['json'].get('startedAt', ''),\n            'canProceed': can_proceed,\n            'todaySessionCount': today_count,\n            'maxSessionsPerDay': max_sessions\n        }\n    }\n]"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -9216,
+        3936
+      ],
+      "id": "6fd29691-85c4-4c75-9187-e9f7645ad988",
+      "name": "Init DB + Session Limit Check"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "bb111111-1111-1111-1111-111111111111",
+              "leftValue": "={{ $json.canProceed }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -8992,
+        3936
+      ],
+      "id": "b9e90618-9a05-4411-b4ea-df0d9b712a84",
+      "name": "Can Proceed?"
+    },
+    {
+      "parameters": {
+        "language": "pythonNative",
+        "pythonCode": "import json\nfrom datetime import datetime\nfrom pathlib import Path\n\nsession_id = _items[0]['json']['sessionId']\ncount = _items[0]['json'].get('todaySessionCount', 0)\nmax_s = _items[0]['json'].get('maxSessionsPerDay', 3)\n\nlog_file = Path('/data/linkedin_intel/logs/sessions.log')\nlog_file.parent.mkdir(parents=True, exist_ok=True)\n\nwith open(log_file, 'a') as f:\n    f.write(json.dumps({\n        'event': 'SESSION_LIMIT_REACHED',\n        'sessionId': session_id,\n        'todayCount': count,\n        'maxAllowed': max_s,\n        'timestamp': datetime.utcnow().isoformat()\n    }) + '\\n')\n\nreturn [\n    {\n        'json': {\n            'skipped': True,\n            'reason': f'SESSION_LIMIT_{count}_of_{max_s}',\n            'sessionId': session_id\n        }\n    }\n]"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -8768,
+        4080
+      ],
+      "id": "a5c7c595-2804-4a0c-8357-eb27ed2784aa",
+      "name": "Log Limit Reached"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        -8560,
+        4080
+      ],
+      "id": "50889be8-6568-4ec8-a4f5-54e93bcda437",
+      "name": "No Operation, do nothing2"
+    },
+    {
+      "parameters": {
+        "language": "pythonNative",
+        "pythonCode": "import json\nimport time\nimport requests\nfrom stem import Signal\nfrom stem.control import Controller\nfrom pathlib import Path\n\nsession_id = _items[0]['json']['sessionId']\n\nTOR_PASSWORD = 'R3XeN3jmWiFINaRX'\nTOR_CONTROL_PORT = 9051\nALLOWED_COUNTRIES = {'US', 'GB', 'DE', 'CA', 'AU'}\nBLOCKED_ORGS = ['Amazon', 'Google', 'Microsoft', 'DigitalOcean', 'Cloudflare', 'Linode']\n\nTOR_PROXIES = {\n    'http': 'socks5h://127.0.0.1:9050',\n    'https': 'socks5h://127.0.0.1:9050'\n}\n\ndef rotate_circuit():\n    try:\n        with Controller.from_port(port=TOR_CONTROL_PORT) as ctrl:\n            ctrl.authenticate(password=TOR_PASSWORD)\n            ctrl.signal(Signal.NEWNYM)\n        time.sleep(5)\n        return True\n    except Exception:\n        return False\n\ndef get_ip_info():\n    try:\n        r = requests.get(\n            'https://ipinfo.io/json',\n            proxies=TOR_PROXIES,\n            timeout=15\n        )\n        return r.json()\n    except Exception:\n        return {}\n\ndef is_usable(info):\n    country = info.get('country', '')\n    org = info.get('org', '')\n    if country not in ALLOWED_COUNTRIES:\n        return False, f'Country not allowed: {country}'\n    if any(b in org for b in BLOCKED_ORGS):\n        return False, f'Datacenter org: {org}'\n    return True, 'OK'\n\nip_result = {\n    'success': False,\n    'ip': None,\n    'country': None,\n    'timezone': 'America/New_York',\n    'attempts': 0\n}\n\nfor attempt in range(1, 4):\n    ip_result['attempts'] = attempt\n    if not rotate_circuit():\n        continue\n    info = get_ip_info()\n    if not info:\n        continue\n    usable, reason = is_usable(info)\n    if usable:\n        ip_result['success'] = True\n        ip_result['ip'] = info.get('ip', 'unknown')\n        ip_result['country'] = info.get('country', 'unknown')\n        ip_result['timezone'] = info.get('timezone', 'America/New_York')\n        break\n\nlog_file = Path('/data/linkedin_intel/logs/sessions.log')\nlog_file.parent.mkdir(parents=True, exist_ok=True)\nwith open(log_file, 'a') as f:\n    f.write(json.dumps({\n        'event': 'IP_ROTATION',\n        'sessionId': session_id,\n        'result': ip_result\n    }) + '\\n')\n\nreturn [\n    {\n        'json': {\n            'sessionId': session_id,\n            'startedAt': _items[0]['json'].get('startedAt', ''),\n            'ipRotated': ip_result['success'],\n            'currentIp': ip_result['ip'],\n            'ipCountry': ip_result['country'],\n            'sessionTimezone': ip_result['timezone'],\n            'rotationAttempts': ip_result['attempts']\n        }\n    }\n]"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -8768,
+        3792
+      ],
+      "id": "4b93a4ac-dd49-45eb-88f8-071d33286178",
+      "name": "Rotate Tor IP"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "cc111111-1111-1111-1111-111111111111",
+              "leftValue": "={{ $json.ipRotated }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -8560,
+        3792
+      ],
+      "id": "dd3a744c-98f1-4c75-8c88-b0647e94f2ed",
+      "name": "IP Rotation OK?"
+    },
+    {
+      "parameters": {
+        "language": "pythonNative",
+        "pythonCode": "import json\nimport sqlite3\nfrom datetime import datetime\nfrom pathlib import Path\n\nsession_id = _items[0]['json']['sessionId']\nattempts = _items[0]['json'].get('rotationAttempts', 3)\n\ntry:\n    conn = sqlite3.connect('/data/linkedin_intel/leads.db')\n    conn.execute(\n        \"UPDATE sessions SET status='FAILED', ended_at=? WHERE session_id=?\",\n        (datetime.utcnow().isoformat(), session_id)\n    )\n    conn.commit()\n    conn.close()\nexcept Exception:\n    pass\n\nlog_file = Path('/data/linkedin_intel/logs/sessions.log')\nlog_file.parent.mkdir(parents=True, exist_ok=True)\nwith open(log_file, 'a') as f:\n    f.write(json.dumps({\n        'event': 'IP_ROTATION_FAILED',\n        'sessionId': session_id,\n        'attempts': attempts,\n        'timestamp': datetime.utcnow().isoformat()\n    }) + '\\n')\n\nreturn [\n    {\n        'json': {\n            'failed': True,\n            'reason': 'IP_ROTATION_FAILED',\n            'sessionId': session_id\n        }\n    }\n]"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -8336,
+        3936
+      ],
+      "id": "a31ff521-e2cc-4897-9832-1a25d9d4398e",
+      "name": "Log IP Failure"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:8080/message",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "token",
+              "value": "YOUR_GOTIFY_TOKEN_HERE"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {}
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -8112,
+        3936
+      ],
+      "id": "7f1ab76d-3203-497a-bb4a-ea1dbc4be38e",
+      "name": "Notify IP Failure"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        -7888,
+        3936
+      ],
+      "id": "92bc5bad-e33e-454a-91f6-6141761999d2",
+      "name": "No Operation, do nothing3"
+    },
+    {
+      "parameters": {
+        "url": "=http://scraper-service:8000/?sessionId={{ $json.sessionId }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -8336,
+        3648
+      ],
+      "id": "470a7748-d225-47fc-83ef-07fb4eaa0f30",
+      "name": "Call Scraper Service"
+    },
+    {
+      "parameters": {
+        "language": "pythonNative",
+        "pythonCode": "import json\n\ndata = _items[0]['json']\n\nstatus = data.get('status', 'UNKNOWN')\nsession_id = data.get('sessionId', 'unknown')\nposts_found = data.get('postsFound', 0)\ndetection_event = data.get('detectionEvent', None)\nraw_file = data.get('rawFile', '')\nquery_used = data.get('query', '')\nerror = data.get('error', '')\n\ncan_process = status in ['COMPLETED', 'PARTIAL'] and posts_found > 0\n\nreturn [\n    {\n        'json': {\n            'sessionId': session_id,\n            'scraperStatus': status,\n            'postsFound': posts_found,\n            'detectionEvent': detection_event,\n            'rawFile': raw_file,\n            'queryUsed': query_used,\n            'canProcess': can_process,\n            'scraperError': error\n        }\n    }\n]"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -8112,
+        3648
+      ],
+      "id": "c1c9a775-737d-4f38-b3fb-b5fd9c2905fe",
+      "name": "Parse Scraper Output"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "dd111111-1111-1111-1111-111111111111",
+              "leftValue": "={{ $json.canProcess }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -7888,
+        3648
+      ],
+      "id": "e0943417-5f39-4594-a3ac-94326ae7439a",
+      "name": "Posts Found?"
+    },
+    {
+      "parameters": {
+        "language": "pythonNative",
+        "pythonCode": "import json\nimport sqlite3\nfrom datetime import datetime\nfrom pathlib import Path\n\nsession_id = _items[0]['json']['sessionId']\nstatus = _items[0]['json'].get('scraperStatus', 'FAILED')\ndetection_event = _items[0]['json'].get('detectionEvent', None)\n\ntry:\n    conn = sqlite3.connect('/data/linkedin_intel/leads.db')\n    conn.execute(\n        \"UPDATE sessions SET status='FAILED', ended_at=?, detection_event=? WHERE session_id=?\",\n        (datetime.utcnow().isoformat(), str(detection_event), session_id)\n    )\n    conn.commit()\n    conn.close()\nexcept Exception:\n    pass\n\nlog_file = Path('/data/linkedin_intel/logs/sessions.log')\nlog_file.parent.mkdir(parents=True, exist_ok=True)\nwith open(log_file, 'a') as f:\n    f.write(json.dumps({\n        'event': 'SCRAPER_NO_POSTS',\n        'sessionId': session_id,\n        'scraperStatus': status,\n        'detectionEvent': str(detection_event),\n        'timestamp': datetime.utcnow().isoformat()\n    }) + '\\n')\n\nreturn [\n    {\n        'json': {\n            'sessionId': session_id,\n            'failed': True,\n            'reason': status,\n            'detectionEvent': str(detection_event),\n            'leadsStored': 0,\n            'rawFile': _items[0]['json'].get('rawFile', '')\n        }\n    }\n]"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -7680,
+        3792
+      ],
+      "id": "e8222659-9869-454f-ad74-43eac2210a07",
+      "name": "Log Scraper No Posts"
+    },
+    {
+      "parameters": {
+        "language": "pythonNative",
+        "pythonCode": "import json\nimport re\nimport sqlite3\nimport hashlib\nfrom datetime import datetime\nfrom pathlib import Path\n\nsession_id = _items[0]['json']['sessionId']\nraw_file = _items[0]['json'].get('rawFile', '')\n\nYOUR_STACK = {\n    'python', 'django', 'fastapi', 'flask',\n    'postgresql', 'postgres', 'redis', 'docker',\n    'kubernetes', 'aws', 'gcp', 'react',\n    'typescript', 'golang', 'kafka', 'terraform'\n}\n\nYOUR_ROLES = {\n    'senior software engineer',\n    'backend engineer',\n    'senior backend engineer',\n    'platform engineer',\n    'staff engineer',\n    'senior developer',\n    'software architect',\n    'devops engineer',\n    'site reliability engineer',\n    'sre'\n}\n\nYOUR_LEVEL = 'senior'\nPREFER_REMOTE = True\nHIGH_PRIORITY_THRESHOLD = 7\nMIN_SCORE_TO_STORE = 2\n\nBAIT = [\n    (r'comment\\s+[\"\\']?yes[\"\\']?', -3),\n    (r'type\\s+[\"\\']?yes[\"\\']?\\s+if', -3),\n    (r'drop\\s+a\\s+[\"\\']?yes[\"\\']?', -3),\n    (r'post\\s+your\\s+jobs?\\s+in\\s+the\\s+comments', -3),\n    (r'who\\s+needs?\\s+to\\s+hear\\s+this', -2),\n    (r'not\\s+sure\\s+who\\s+needs?\\s+to\\s+hear', -2),\n    (r'tag\\s+someone\\s+who', -2),\n    (r'repost\\s+to\\s+help', -1),\n    (r'share\\s+this\\s+with\\s+your\\s+network', -1)\n]\n\nREAL = [\n    (r'\\d+\\s*(?:years?|yrs?)\\s+(?:of\\s+)?experience', 2),\n    (r'(?:remote|hybrid|onsite|on-site)', 1),\n    (r'(?:salary|compensation).*\\$[\\d,]+', 2),\n    (r\"i'?m\\s+personally\\s+reviewing\", 2),\n    (r'send\\s+(?:me|your)\\s+(?:resume|cv)', 2),\n    (r'(?:immediately|asap|urgent)', 1),\n    (r'(?:full.?time|contract|freelance)', 1)\n]\n\ndef extract_emails(text):\n    patterns = [\n        r'[a-zA-Z0-9._%+\\-]+@[a-zA-Z0-9.\\-]+\\.[a-zA-Z]{2,}',\n        r'(?i)email\\s*(?:me\\s*at|:)\\s*([a-zA-Z0-9._%+\\-]+@[a-zA-Z0-9.\\-]+\\.[a-zA-Z]{2,})',\n        r'(?i)reach\\s+(?:me|out)\\s+at\\s+([a-zA-Z0-9._%+\\-]+@[a-zA-Z0-9.\\-]+\\.[a-zA-Z]{2,})',\n        r'(?i)contact\\s+me\\s+at\\s*:?\\s*([a-zA-Z0-9._%+\\-]+@[a-zA-Z0-9.\\-]+\\.[a-zA-Z]{2,})'\n    ]\n    found = set()\n    for p in patterns:\n        for m in re.findall(p, text):\n            e = (m if isinstance(m, str) else m).strip().rstrip('.,;:)')\n            if '@' in e and '.' in e.split('@')[-1]:\n                if not any(x in e for x in ['example.com', 'test@', 'youremail']):\n                    found.add(e.lower())\n    return list(found)\n\ndef get_bait_score(text):\n    score = 0\n    for pattern, weight in BAIT:\n        if re.search(pattern, text, re.I):\n            score += weight\n    return score\n\ndef enrich_and_score(post):\n    text = post.get('text', '').lower()\n    score = 0\n    found_stack = []\n    for tech in YOUR_STACK:\n        if re.search(r'\\b' + re.escape(tech) + r'\\b', text, re.I):\n            found_stack.append(tech)\n    score += len(found_stack)\n    post['tech_stack'] = found_stack\n    role_found = ''\n    for role in YOUR_ROLES:\n        if role in text:\n            role_found = role.title()\n            score += 3\n            break\n    if not role_found:\n        for role in YOUR_ROLES:\n            words = role.split()\n            if any(w in text for w in words if len(w) > 4):\n                role_found = role.title()\n                score += 1\n                break\n    post['role_title'] = role_found\n    exp = 'unknown'\n    if re.search(r'(?:senior|sr\\.?|5\\+\\s*years?|6\\+\\s*years?)', text, re.I):\n        exp = 'senior'\n        if YOUR_LEVEL == 'senior':\n            score += 2\n    elif re.search(r'(?:lead|principal|staff|8\\+\\s*years?)', text, re.I):\n        exp = 'lead'\n        score += 1\n    elif re.search(r'(?:junior|entry|0-2\\s*years?)', text, re.I):\n        exp = 'entry'\n    elif re.search(r'(?:mid.?level|2-4\\s*years?|3-5\\s*years?)', text, re.I):\n        exp = 'mid'\n    post['experience_level'] = exp\n    remote = 'unknown'\n    if re.search(r'\\bfully\\s+remote\\b|\\b100%\\s+remote\\b', text, re.I):\n        remote = 'remote'\n        if PREFER_REMOTE:\n            score += 2\n    elif re.search(r'\\bremote\\b', text, re.I):\n        remote = 'remote'\n        if PREFER_REMOTE:\n            score += 1\n    elif re.search(r'\\bhybrid\\b', text, re.I):\n        remote = 'hybrid'\n        if PREFER_REMOTE:\n            score += 1\n    elif re.search(r'\\bonsite\\b|\\bon-site\\b', text, re.I):\n        remote = 'onsite'\n    post['remote_signal'] = remote\n    loc_match = re.search(\n        r'\\b(?:New York|San Francisco|London|Austin|Seattle|Chicago|Boston|Los Angeles|Berlin|Toronto|Vancouver|Remote|Worldwide|Anywhere)\\b',\n        post.get('text', ''), re.I\n    )\n    post['location'] = loc_match.group(0) if loc_match else ''\n    sal_match = re.search(\n        r'\\$[\\d,]+(?:k|K)?(?:\\s*[-]\\s*\\$[\\d,]+(?:k|K)?)?',\n        post.get('text', '')\n    )\n    post['salary'] = sal_match.group(0) if sal_match else ''\n    for pattern, weight in REAL:\n        if re.search(pattern, text, re.I):\n            score += weight\n    return score\n\nif not raw_file or not Path(raw_file).exists():\n    return [\n        {\n            'json': {\n                'sessionId': session_id,\n                'leadsStored': 0,\n                'highPriorityLeads': [],\n                'highPriorityCount': 0,\n                'totalProcessed': 0,\n                'rawFile': raw_file,\n                'error': 'Raw file not found'\n            }\n        }\n    ]\n\ntry:\n    posts = json.loads(Path(raw_file).read_text())\nexcept Exception as e:\n    return [\n        {\n            'json': {\n                'sessionId': session_id,\n                'leadsStored': 0,\n                'highPriorityLeads': [],\n                'highPriorityCount': 0,\n                'totalProcessed': 0,\n                'rawFile': raw_file,\n                'error': f'Parse error: {str(e)}'\n            }\n        }\n    ]\n\ndb_path = '/data/linkedin_intel/leads.db'\nconn = sqlite3.connect(db_path)\nconn.execute('PRAGMA journal_mode=WAL')\nnow = datetime.utcnow().isoformat()\nleads_stored = 0\nhigh_priority = []\n\nfor post in posts:\n    text = post.get('text', '')\n    if not text:\n        continue\n    emails = extract_emails(text)\n    if not emails:\n        continue\n    bait_sc = get_bait_score(text)\n    if bait_sc < -2:\n        continue\n    rel_sc = enrich_and_score(post)\n    if rel_sc < MIN_SCORE_TO_STORE:\n        continue\n    author_url = post.get('author_url', '')\n    found_at = post.get('found_at', now)\n    lead_id = hashlib.sha256(\n        f'{author_url}::{found_at}'.encode()\n    ).hexdigest()\n    row = conn.execute(\n        'SELECT id FROM leads WHERE id = ?', (lead_id,)\n    ).fetchone()\n    if row:\n        continue\n    dup_email = False\n    for email in emails:\n        email_hash = hashlib.sha256(email.encode()).hexdigest()\n        row = conn.execute(\n            'SELECT email_hash FROM email_seen WHERE email_hash = ?',\n            (email_hash,)\n        ).fetchone()\n        if row:\n            dup_email = True\n            break\n    if dup_email:\n        continue\n    try:\n        conn.execute(\"\"\"\n            INSERT INTO leads (\n                id, author_name, author_url, post_text,\n                emails, hashtags, tech_stack, role_title,\n                experience_level, remote_signal, location,\n                salary, relevance_score, bait_score,\n                status, session_id, created_at\n            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)\n        \"\"\", (\n            lead_id,\n            post.get('author_name', ''),\n            author_url,\n            text,\n            json.dumps(emails),\n            json.dumps(post.get('hashtags', [])),\n            json.dumps(post.get('tech_stack', [])),\n            post.get('role_title', ''),\n            post.get('experience_level', ''),\n            post.get('remote_signal', ''),\n            post.get('location', ''),\n            post.get('salary', ''),\n            rel_sc,\n            bait_sc,\n            'NEW',\n            session_id,\n            now\n        ))\n        for email in emails:\n            email_hash = hashlib.sha256(email.encode()).hexdigest()\n            conn.execute(\n                'INSERT OR IGNORE INTO email_seen (email_hash, email, first_seen) VALUES (?,?,?)',\n                (email_hash, email, now)\n            )\n        conn.commit()\n        leads_stored += 1\n        if rel_sc >= HIGH_PRIORITY_THRESHOLD:\n            high_priority.append({\n                'role_title': post.get('role_title', 'Unknown Role'),\n                'author_name': post.get('author_name', ''),\n                'emails': emails,\n                'tech_stack': post.get('tech_stack', []),\n                'remote_signal': post.get('remote_signal', ''),\n                'relevance_score': rel_sc,\n                'salary': post.get('salary', '')\n            })\n    except Exception:\n        conn.rollback()\n        continue\n\nconn.execute(\n    'UPDATE sessions SET posts_scanned=?, leads_stored=? WHERE session_id=?',\n    (len(posts), leads_stored, session_id)\n)\nconn.commit()\nconn.close()\n\nreturn [\n    {\n        'json': {\n            'sessionId': session_id,\n            'leadsStored': leads_stored,\n            'highPriorityLeads': high_priority,\n            'highPriorityCount': len(high_priority),\n            'totalProcessed': len(posts),\n            'rawFile': raw_file\n        }\n    }\n]"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -7680,
+        3552
+      ],
+      "id": "859f0a2a-48a3-4158-982e-cf26bb28f224",
+      "name": "Extract + Score + Save Leads"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "ee111111-1111-1111-1111-111111111111",
+              "leftValue": "={{ $json.highPriorityCount }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -7456,
+        3552
+      ],
+      "id": "3e50f348-e46d-4d80-a54c-f855b10dc59a",
+      "name": "High Priority Found?"
+    },
+    {
+      "parameters": {
+        "language": "pythonNative",
+        "pythonCode": "import json\n\nleads = _items[0]['json'].get('highPriorityLeads', [])\nsession_id = _items[0]['json'].get('sessionId', 'unknown')\ntotal = _items[0]['json'].get('leadsStored', 0)\nraw_file = _items[0]['json'].get('rawFile', '')\n\nlines = []\nfor lead in leads[:5]:\n    role = lead.get('role_title', 'Unknown Role')\n    emails = lead.get('emails', [])\n    score = lead.get('relevance_score', 0)\n    remote = lead.get('remote_signal', '')\n    stack = ', '.join(lead.get('tech_stack', [])[:3])\n    email_str = emails[0] if emails else 'no email'\n    lines.append(\n        f'{role} | Score:{score} | {email_str} | {remote} | {stack}'\n    )\n\nmessage = (\n    f'Session: {session_id}\\nTotal stored: {total}\\n\\n'\n    + '\\n'.join(lines)\n)\n\nif len(leads) > 5:\n    message += f'\\n\\n...and {len(leads) - 5} more. Check dashboard.'\n\nreturn [\n    {\n        'json': {\n            'notificationTitle': f'{len(leads)} High Priority Lead(s) Found',\n            'notificationMessage': message,\n            'notificationPriority': 8,\n            'sessionId': session_id,\n            'leadsStored': total,\n            'highPriorityCount': len(leads),\n            'highPriorityLeads': leads,\n            'rawFile': raw_file\n        }\n    }\n]"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -7232,
+        3408
+      ],
+      "id": "4cf3f27e-d9dc-4b42-aea1-a044e1bfd96d",
+      "name": "Build Notification Message"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:8080/message",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "token",
+              "value": "YOUR_GOTIFY_TOKEN_HERE"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {}
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -7008,
+        3408
+      ],
+      "id": "fe09c1ac-4555-41ea-b441-4b118c91ff1c",
+      "name": "Send Phone Notification"
+    },
+    {
+      "parameters": {
+        "language": "pythonNative",
+        "pythonCode": "import json\nimport sqlite3\nfrom datetime import datetime, timedelta\nfrom pathlib import Path\n\ninput_data = _items[0]['json'] if _items else {}\nsession_id = input_data.get('sessionId', 'unknown')\ndetection_event = input_data.get('detectionEvent', None)\nleads_stored = input_data.get('leadsStored', 0)\nraw_file = input_data.get('rawFile', '')\n\nif detection_event and str(detection_event) not in ['None', '']:\n    freeze_hours = 48 if 'HARD' in str(detection_event) else 6\n    resume_time = (\n        datetime.utcnow() + timedelta(hours=freeze_hours)\n    ).isoformat()\n    freeze_file = Path('/data/linkedin_intel/state/freeze.json')\n    freeze_file.parent.mkdir(parents=True, exist_ok=True)\n    freeze_file.write_text(json.dumps({\n        'frozen': True,\n        'reason': str(detection_event),\n        'frozenAt': datetime.utcnow().isoformat(),\n        'resumeAfter': resume_time,\n        'freezeHours': freeze_hours\n    }))\n\nif raw_file:\n    src = Path(raw_file)\n    if src.exists():\n        archive_dir = Path('/data/linkedin_intel/raw_posts/archive')\n        archive_dir.mkdir(parents=True, exist_ok=True)\n        src.rename(archive_dir / src.name)\n\ntry:\n    conn = sqlite3.connect('/data/linkedin_intel/leads.db')\n    conn.execute(\n        \"UPDATE sessions SET status='COMPLETED', ended_at=?, leads_stored=? WHERE session_id=?\",\n        (datetime.utcnow().isoformat(), leads_stored, session_id)\n    )\n    conn.commit()\n    conn.close()\nexcept Exception:\n    pass\n\nlog_file = Path('/data/linkedin_intel/logs/sessions.log')\nlog_file.parent.mkdir(parents=True, exist_ok=True)\nwith open(log_file, 'a') as f:\n    f.write(json.dumps({\n        'event': 'SESSION_COMPLETE',\n        'sessionId': session_id,\n        'leadsStored': leads_stored,\n        'detectionEvent': str(detection_event),\n        'completedAt': datetime.utcnow().isoformat()\n    }) + '\\n')\n\nreturn [\n    {\n        'json': {\n            'sessionId': session_id,\n            'sessionComplete': True,\n            'leadsStored': leads_stored,\n            'detectionHandled': bool(\n                detection_event\n                and str(detection_event) not in ['None', '']\n            ),\n            'completedAt': datetime.utcnow().isoformat()\n        }\n    }\n]"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -6800,
+        3552
+      ],
+      "id": "baf3eb3e-90e8-41e0-bd59-83031aba50a8",
+      "name": "Finalize Session"
+    }
+  ],
+  "connections": {
+    "Cron Trigger": {
+      "main": [
+        [
+          {
+            "node": "Build Session + Freeze Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Session + Freeze Check": {
+      "main": [
+        [
+          {
+            "node": "Frozen OR Blackout?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Frozen OR Blackout?": {
+      "main": [
+        [
+          {
+            "node": "Log Skip Reason",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Init DB + Session Limit Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Skip Reason": {
+      "main": [
+        [
+          {
+            "node": "No Operation, do nothing1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Init DB + Session Limit Check": {
+      "main": [
+        [
+          {
+            "node": "Can Proceed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Can Proceed?": {
+      "main": [
+        [
+          {
+            "node": "Log Limit Reached",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Rotate Tor IP",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Limit Reached": {
+      "main": [
+        [
+          {
+            "node": "No Operation, do nothing2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rotate Tor IP": {
+      "main": [
+        [
+          {
+            "node": "IP Rotation OK?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IP Rotation OK?": {
+      "main": [
+        [
+          {
+            "node": "Log IP Failure",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Call Scraper Service",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log IP Failure": {
+      "main": [
+        [
+          {
+            "node": "Notify IP Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notify IP Failure": {
+      "main": [
+        [
+          {
+            "node": "No Operation, do nothing3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Scraper Service": {
+      "main": [
+        [
+          {
+            "node": "Parse Scraper Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Scraper Output": {
+      "main": [
+        [
+          {
+            "node": "Posts Found?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Posts Found?": {
+      "main": [
+        [
+          {
+            "node": "Log Scraper No Posts",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Extract + Score + Save Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Scraper No Posts": {
+      "main": [
+        [
+          {
+            "node": "Finalize Session",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract + Score + Save Leads": {
+      "main": [
+        [
+          {
+            "node": "High Priority Found?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "High Priority Found?": {
+      "main": [
+        [
+          {
+            "node": "Finalize Session",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Notification Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Notification Message": {
+      "main": [
+        [
+          {
+            "node": "Send Phone Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Phone Notification": {
+      "main": [
+        [
+          {
+            "node": "Finalize Session",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "558d88703fb65b2d0e44613bc35916258b0f0bf983c5d4730c00c424b77ca36a"
+  }
+}
